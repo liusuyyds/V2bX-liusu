@@ -75,6 +75,9 @@ func (l *Lego) SetProvider() error {
 			return err
 		}
 	case "dns":
+		if strings.EqualFold(l.config.Provider, "cloudflare") {
+			sanitizeCloudflareAuthEnv(l.config.DNSEnv)
+		}
 		for k, v := range l.config.DNSEnv {
 			os.Setenv(k, v)
 		}
@@ -88,6 +91,47 @@ func (l *Lego) SetProvider() error {
 		}
 	}
 	return nil
+}
+
+var cloudflareTokenEnvKeys = []string{
+	"CF_DNS_API_TOKEN",
+	"CF_ZONE_API_TOKEN",
+	"CLOUDFLARE_DNS_API_TOKEN",
+	"CLOUDFLARE_ZONE_API_TOKEN",
+	"CF_DNS_API_TOKEN_FILE",
+	"CF_ZONE_API_TOKEN_FILE",
+	"CLOUDFLARE_DNS_API_TOKEN_FILE",
+	"CLOUDFLARE_ZONE_API_TOKEN_FILE",
+}
+
+var cloudflareLegacyAuthEnvKeys = []string{
+	"CF_API_EMAIL",
+	"CF_API_KEY",
+	"CLOUDFLARE_EMAIL",
+	"CLOUDFLARE_API_KEY",
+	"CF_API_EMAIL_FILE",
+	"CF_API_KEY_FILE",
+	"CLOUDFLARE_EMAIL_FILE",
+	"CLOUDFLARE_API_KEY_FILE",
+}
+
+func sanitizeCloudflareAuthEnv(env map[string]string) {
+	if !cloudflareTokenAuthConfigured(env) {
+		return
+	}
+
+	for _, key := range cloudflareLegacyAuthEnvKeys {
+		_ = os.Unsetenv(key)
+	}
+}
+
+func cloudflareTokenAuthConfigured(env map[string]string) bool {
+	for _, key := range cloudflareTokenEnvKeys {
+		if strings.TrimSpace(env[key]) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Lego) CreateCert() (err error) {
