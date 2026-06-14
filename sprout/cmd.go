@@ -8,7 +8,10 @@ import (
 )
 
 var command = &cobra.Command{
-	Use: "qingsu",
+	Use:   "qingsu",
+	Short: "Run qingsu",
+	Run:   serverHandle,
+	Args:  cobra.NoArgs,
 }
 
 func Run() {

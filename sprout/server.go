@@ -27,10 +27,10 @@ var serverCommand = cobra.Command{
 }
 
 func init() {
-	serverCommand.PersistentFlags().
+	command.PersistentFlags().
 		StringVarP(&config, "config", "c",
 			"/etc/qingsu/config.json", "config file path")
-	serverCommand.PersistentFlags().
+	command.PersistentFlags().
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")
 	command.AddCommand(&serverCommand)

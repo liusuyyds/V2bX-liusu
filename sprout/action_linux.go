@@ -63,10 +63,10 @@ func startHandle(_ *cobra.Command, _ []string) {
 		fmt.Println(Err("qingsu启动失败"))
 	}
 	if !r {
-		fmt.Println(Err("qingsu可能启动失败，请稍后使用 qingsu log 查看日志信息"))
+		fmt.Println(Err("qingsu可能启动失败，请稍后使用 qs log 查看日志信息"))
 		return
 	}
-	fmt.Println(Ok("qingsu 启动成功，请使用 qingsu log 查看运行日志"))
+	fmt.Println(Ok("qingsu 启动成功，请使用 qs log 查看运行日志"))
 }
 
 func stopHandle(_ *cobra.Command, _ []string) {
@@ -104,7 +104,7 @@ func restartHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	if !r {
-		fmt.Println(Err("qingsu可能启动失败，请稍后使用 qingsu log 查看日志信息"))
+		fmt.Println(Err("qingsu可能启动失败，请稍后使用 qs log 查看日志信息"))
 		return
 	}
 	fmt.Println(Ok("qingsu重启成功"))
