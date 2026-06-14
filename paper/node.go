@@ -9,6 +9,7 @@ import (
 
 	"encoding/json"
 
+	"github.com/qingsu/atlas/base/secret"
 	"github.com/qingsu/atlas/base/json5"
 )
 
@@ -82,6 +83,17 @@ func (n *NodeConfig) UnmarshalJSON(data []byte) (err error) {
 		err = json.Unmarshal(data, &n.ApiConfig)
 		if err != nil {
 			return
+		}
+	}
+	if secret.IsEncryptedAPIKey(n.ApiConfig.Key) {
+		var apiKeySecret string
+		apiKeySecret, _, err = secret.ResolveAPIKeySecret("", false)
+		if err != nil {
+			return fmt.Errorf("load api key secret error: %w", err)
+		}
+		n.ApiConfig.Key, err = secret.DecryptAPIKey(n.ApiConfig.Key, apiKeySecret)
+		if err != nil {
+			return fmt.Errorf("decrypt api key error: %w", err)
 		}
 	}
 
