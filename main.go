@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/InazumaV/V2bX/cmd"
+	cmd "github.com/qingsu/atlas/sprout"
 )
 
 func main() {

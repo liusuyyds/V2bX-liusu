@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package qingsu.core.app.dispatcher;
+option csharp_namespace = "qingsu.core.app.dispatcher";
+option go_package = "github.com/qingsu/atlas/field/xray/app/dispatcher";
+option java_package = "com.qingsu.core.app.dispatcher";
+option java_multiple_files = true;
+
+message SessionConfig {
+  reserved 1;
+}
+
+message Config {
+  SessionConfig settings = 1;
+}
