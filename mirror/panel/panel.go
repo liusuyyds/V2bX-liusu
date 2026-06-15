@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sirupsen/logrus"
 
@@ -31,6 +33,11 @@ type Client struct {
 }
 
 func New(c *conf.ApiConfig) (*Client, error) {
+	apiHost, err := normalizeAPIHost(c.APIHost)
+	if err != nil {
+		return nil, err
+	}
+
 	var client *resty.Client
 	if c.APISendIP != "" {
 		client = resty.NewWithLocalAddr(&net.TCPAddr{
@@ -53,7 +60,7 @@ func New(c *conf.ApiConfig) (*Client, error) {
 			logrus.Error(v.Err)
 		}
 	})
-	client.SetBaseURL(c.APIHost)
+	client.SetBaseURL(apiHost)
 	// Check node type
 	c.NodeType = strings.ToLower(c.NodeType)
 	switch c.NodeType {
@@ -80,11 +87,36 @@ func New(c *conf.ApiConfig) (*Client, error) {
 	return &Client{
 		client:    client,
 		Token:     c.Key,
-		APIHost:   c.APIHost,
+		APIHost:   apiHost,
 		APISendIP: c.APISendIP,
 		NodeType:  c.NodeType,
 		NodeId:    c.NodeID,
 		UserList:  &UserListBody{},
 		AliveMap:  &AliveMap{},
 	}, nil
+}
+
+func normalizeAPIHost(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("invalid ApiHost: value is empty")
+	}
+
+	if scheme, rest, ok := strings.Cut(raw, "://"); ok {
+		raw = scheme + "://" + strings.TrimLeftFunc(rest, unicode.IsSpace)
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid ApiHost %q: %w", raw, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid ApiHost %q: scheme or host is missing", raw)
+	}
+	if strings.IndexFunc(parsed.Host, unicode.IsSpace) >= 0 {
+		return "", fmt.Errorf("invalid ApiHost %q: host contains whitespace", raw)
+	}
+
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return parsed.String(), nil
 }

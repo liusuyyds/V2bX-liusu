@@ -38,17 +38,16 @@ func (c *Client) GetUserList() ([]UserInfo, error) {
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
-	if r == nil || r.RawResponse == nil {
-		return nil, fmt.Errorf("received nil response or raw response")
+	if err = c.checkResponse(r, path, err); err != nil {
+		return nil, err
+	}
+	if r.RawResponse == nil {
+		return nil, fmt.Errorf("request %s failed: empty raw response", c.assembleURL(path))
 	}
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
 		return nil, nil
-	}
-
-	if err = c.checkResponse(r, path, err); err != nil {
-		return nil, err
 	}
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
@@ -97,7 +96,7 @@ func (c *Client) GetUserAlive() (map[int]int, error) {
 	r, err := c.client.R().
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil || r.StatusCode() >= 399 {
+	if err != nil || r == nil || r.StatusCode() >= 399 {
 		c.AliveMap.Alive = make(map[int]int)
 		return c.AliveMap.Alive, nil
 	}
