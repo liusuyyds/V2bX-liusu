@@ -3,6 +3,7 @@ package sing
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/qingsu/atlas/mirror/panel"
 	"github.com/qingsu/atlas/paper"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/auth"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json/badoption"
 )
@@ -31,6 +33,7 @@ type HttpRequest struct {
 	Version string   `json:"version"`
 	Method  string   `json:"method"`
 	Path    []string `json:"path"`
+	Host    []string `json:"host"`
 	Headers struct {
 		Host []string `json:"Host"`
 	} `json:"headers"`
@@ -46,8 +49,212 @@ type GrpcNetworkConfig struct {
 }
 
 type HttpupgradeNetworkConfig struct {
-	Path string `json:"path"`
-	Host string `json:"host"`
+	Path    string            `json:"path"`
+	Host    string            `json:"host"`
+	Headers map[string]string `json:"headers"`
+}
+
+type H2NetworkConfig struct {
+	Host   panel.StringList `json:"host"`
+	Path   string           `json:"path"`
+	Method string           `json:"method"`
+}
+
+func randomAuthUser() auth.User {
+	p := make([]byte, 32)
+	_, _ = rand.Read(p)
+	password := hex.EncodeToString(p)
+	return auth.User{
+		Username: password,
+		Password: password,
+	}
+}
+
+func panelUsers(users []panel.UserInfo) []auth.User {
+	if len(users) == 0 {
+		return []auth.User{randomAuthUser()}
+	}
+	userList := make([]auth.User, len(users))
+	for i, user := range users {
+		userList[i] = auth.User{
+			Username: user.Uuid,
+			Password: user.Uuid,
+		}
+	}
+	return userList
+}
+
+func buildInboundMultiplex(global *conf.MultiplexConfig, node *panel.Multiplex) *option.InboundMultiplexOptions {
+	if node != nil {
+		return &option.InboundMultiplexOptions{
+			Enabled: node.Enabled,
+			Padding: node.Padding,
+			Brutal: &option.BrutalOptions{
+				Enabled:  node.Brutal.Enabled,
+				UpMbps:   node.Brutal.UpMbps,
+				DownMbps: node.Brutal.DownMbps,
+			},
+		}
+	}
+	if global != nil {
+		return &option.InboundMultiplexOptions{
+			Enabled: global.Enabled,
+			Padding: global.Padding,
+			Brutal: &option.BrutalOptions{
+				Enabled:  global.Brutal.Enabled,
+				UpMbps:   global.Brutal.UpMbps,
+				DownMbps: global.Brutal.DownMbps,
+			},
+		}
+	}
+	return nil
+}
+
+func applyInboundECH(tls *option.InboundTLSOptions, settings panel.ECHSettings) {
+	if !settings.Enabled {
+		return
+	}
+	tls.ECH = &option.InboundECHOptions{
+		Enabled: true,
+		Key:     badoption.Listable[string]{settings.Key},
+		KeyPath: settings.KeyPath,
+	}
+	if settings.Key == "" {
+		tls.ECH.Key = nil
+	}
+}
+
+func nodeTLSSettings(info *panel.NodeInfo) panel.TlsSettings {
+	switch info.Type {
+	case "vmess", "vless":
+		if info.VAllss != nil {
+			return info.VAllss.TlsSettings
+		}
+	case "trojan":
+		if info.Trojan != nil {
+			return info.Trojan.TlsSettings
+		}
+	case "socks", "http", "naive":
+		if info.Simple != nil {
+			return info.Simple.TlsSettings
+		}
+	}
+	return panel.TlsSettings{}
+}
+
+func buildV2RayTransport(network string, raw json.RawMessage) (*option.V2RayTransportOptions, error) {
+	if network == "" || network == "tcp" && len(raw) == 0 {
+		return nil, nil
+	}
+	t := &option.V2RayTransportOptions{
+		Type: network,
+	}
+	switch network {
+	case "tcp":
+		networkConfig := HttpNetworkConfig{}
+		if len(raw) != 0 {
+			if err := json.Unmarshal(raw, &networkConfig); err != nil {
+				return nil, fmt.Errorf("decode NetworkSettings error: %s", err)
+			}
+		}
+		if networkConfig.Header.Type != "http" {
+			return nil, nil
+		}
+		t.Type = "http"
+		if networkConfig.Header.Request != nil {
+			var request HttpRequest
+			if err := json.Unmarshal(*networkConfig.Header.Request, &request); err != nil {
+				return nil, fmt.Errorf("decode HttpRequest error: %s", err)
+			}
+			t.HTTPOptions.Host = request.Headers.Host
+			if len(request.Path) > 0 {
+				t.HTTPOptions.Path = request.Path[0]
+			}
+			t.HTTPOptions.Method = request.Method
+		}
+	case "http", "h2":
+		t.Type = "http"
+		if len(raw) != 0 {
+			var h2 H2NetworkConfig
+			if err := json.Unmarshal(raw, &h2); err == nil {
+				t.HTTPOptions.Host = []string(h2.Host)
+				t.HTTPOptions.Path = h2.Path
+				t.HTTPOptions.Method = h2.Method
+			}
+			var request HttpRequest
+			if err := json.Unmarshal(raw, &request); err == nil {
+				if len(request.Headers.Host) > 0 {
+					t.HTTPOptions.Host = request.Headers.Host
+				} else if len(request.Host) > 0 {
+					t.HTTPOptions.Host = request.Host
+				}
+				if len(request.Path) > 0 {
+					t.HTTPOptions.Path = request.Path[0]
+				}
+				if request.Method != "" {
+					t.HTTPOptions.Method = request.Method
+				}
+			}
+		}
+	case "ws":
+		var (
+			path    string
+			ed      int
+			headers map[string]badoption.Listable[string]
+		)
+		if len(raw) != 0 {
+			networkConfig := WsNetworkConfig{}
+			if err := json.Unmarshal(raw, &networkConfig); err != nil {
+				return nil, fmt.Errorf("decode NetworkSettings error: %s", err)
+			}
+			u, err := url.Parse(networkConfig.Path)
+			if err != nil {
+				return nil, fmt.Errorf("parse path error: %s", err)
+			}
+			path = u.Path
+			ed, _ = strconv.Atoi(u.Query().Get("ed"))
+			headers = make(map[string]badoption.Listable[string], len(networkConfig.Headers))
+			for k, v := range networkConfig.Headers {
+				headers[k] = badoption.Listable[string]{v}
+			}
+		}
+		t.WebsocketOptions = option.V2RayWebsocketOptions{
+			Path:                path,
+			EarlyDataHeaderName: "Sec-WebSocket-Protocol",
+			MaxEarlyData:        uint32(ed),
+			Headers:             headers,
+		}
+	case "grpc":
+		networkConfig := GrpcNetworkConfig{}
+		if len(raw) != 0 {
+			if err := json.Unmarshal(raw, &networkConfig); err != nil {
+				return nil, fmt.Errorf("decode NetworkSettings error: %s", err)
+			}
+		}
+		t.GRPCOptions = option.V2RayGRPCOptions{
+			ServiceName: networkConfig.ServiceName,
+		}
+	case "httpupgrade":
+		networkConfig := HttpupgradeNetworkConfig{}
+		if len(raw) != 0 {
+			if err := json.Unmarshal(raw, &networkConfig); err != nil {
+				return nil, fmt.Errorf("decode NetworkSettings error: %s", err)
+			}
+		}
+		t.HTTPUpgradeOptions = option.V2RayHTTPUpgradeOptions{
+			Path: networkConfig.Path,
+			Host: networkConfig.Host,
+		}
+		if len(networkConfig.Headers) > 0 {
+			t.HTTPUpgradeOptions.Headers = make(map[string]badoption.Listable[string], len(networkConfig.Headers))
+			for k, v := range networkConfig.Headers {
+				t.HTTPUpgradeOptions.Headers[k] = badoption.Listable[string]{v}
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported sing transport type: %s", network)
+	}
+	return t, nil
 }
 
 func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (option.Inbound, error) {
@@ -60,19 +267,7 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 		ListenPort:  uint16(info.Common.ServerPort),
 		TCPFastOpen: c.SingOptions.TCPFastOpen,
 	}
-	var multiplex *option.InboundMultiplexOptions
-	if c.SingOptions.Multiplex != nil {
-		multiplexOption := option.InboundMultiplexOptions{
-			Enabled: c.SingOptions.Multiplex.Enabled,
-			Padding: c.SingOptions.Multiplex.Padding,
-			Brutal: &option.BrutalOptions{
-				Enabled:  c.SingOptions.Multiplex.Brutal.Enabled,
-				UpMbps:   c.SingOptions.Multiplex.Brutal.UpMbps,
-				DownMbps: c.SingOptions.Multiplex.Brutal.DownMbps,
-			},
-		}
-		multiplex = &multiplexOption
-	}
+	multiplex := buildInboundMultiplex(c.SingOptions.Multiplex, info.Common.Multiplex)
 	var tls option.InboundTLSOptions
 	switch info.Security {
 	case panel.Tls:
@@ -86,25 +281,31 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 			tls.Enabled = true
 			tls.CertificatePath = c.CertConfig.CertFile
 			tls.KeyPath = c.CertConfig.KeyFile
+			settings := nodeTLSSettings(info)
+			tls.ALPN = badoption.Listable[string](settings.ALPN)
+			applyInboundECH(&tls, settings.ECH)
 		}
 	case panel.Reality:
 		tls.Enabled = true
-		v := info.VAllss
-		tls.ServerName = v.TlsSettings.ServerName
-		port, _ := strconv.Atoi(v.TlsSettings.ServerPort)
+		settings := nodeTLSSettings(info)
+		tls.ServerName = settings.ServerName
+		port, _ := strconv.Atoi(settings.ServerPort)
 		var dest string
-		if v.TlsSettings.Dest != "" {
-			dest = v.TlsSettings.Dest
+		if settings.Dest != "" {
+			dest = settings.Dest
 		} else {
 			dest = tls.ServerName
 		}
 
-		mtd, _ := time.ParseDuration(v.RealityConfig.MaxTimeDiff)
+		var maxTimeDiff string
+		if info.VAllss != nil {
+			maxTimeDiff = info.VAllss.RealityConfig.MaxTimeDiff
+		}
+		mtd, _ := time.ParseDuration(maxTimeDiff)
 		tls.Reality = &option.InboundRealityOptions{
 			Enabled:    true,
-			ShortID:    []string{v.TlsSettings.ShortId},
-			PrivateKey: v.TlsSettings.PrivateKey,
-			Xver:       uint8(v.TlsSettings.Xver),
+			ShortID:    []string{settings.ShortId},
+			PrivateKey: settings.PrivateKey,
 			Handshake: option.InboundRealityHandshakeOptions{
 				ServerOptions: option.ServerOptions{
 					Server:     dest,
@@ -120,91 +321,9 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 	switch info.Type {
 	case "vmess", "vless":
 		n := info.VAllss
-		t := option.V2RayTransportOptions{
-			Type: n.Network,
-		}
-		switch n.Network {
-		case "tcp":
-			if len(n.NetworkSettings) != 0 {
-				network := HttpNetworkConfig{}
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-				//Todo fix http options
-				if network.Header.Type == "http" {
-					t.Type = network.Header.Type
-					var request HttpRequest
-					if network.Header.Request != nil {
-						err = json.Unmarshal(*network.Header.Request, &request)
-						if err != nil {
-							return option.Inbound{}, fmt.Errorf("decode HttpRequest error: %s", err)
-						}
-						t.HTTPOptions.Host = request.Headers.Host
-						t.HTTPOptions.Path = request.Path[0]
-						t.HTTPOptions.Method = request.Method
-					}
-				} else {
-					t.Type = ""
-				}
-			} else {
-				t.Type = ""
-			}
-		case "ws":
-			var (
-				path    string
-				ed      int
-				headers map[string]badoption.Listable[string]
-			)
-			if len(n.NetworkSettings) != 0 {
-				network := WsNetworkConfig{}
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-				var u *url.URL
-				u, err = url.Parse(network.Path)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("parse path error: %s", err)
-				}
-				path = u.Path
-				ed, _ = strconv.Atoi(u.Query().Get("ed"))
-				headers = make(map[string]badoption.Listable[string], len(network.Headers))
-				for k, v := range network.Headers {
-					headers[k] = badoption.Listable[string]{
-						v,
-					}
-				}
-			}
-			t.WebsocketOptions = option.V2RayWebsocketOptions{
-				Path:                path,
-				EarlyDataHeaderName: "Sec-WebSocket-Protocol",
-				MaxEarlyData:        uint32(ed),
-				Headers:             headers,
-			}
-		case "grpc":
-			network := GrpcNetworkConfig{}
-			if len(n.NetworkSettings) != 0 {
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-			}
-			t.GRPCOptions = option.V2RayGRPCOptions{
-				ServiceName: network.ServiceName,
-			}
-		case "httpupgrade":
-			network := HttpupgradeNetworkConfig{}
-			if len(n.NetworkSettings) != 0 {
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-			}
-			t.HTTPUpgradeOptions = option.V2RayHTTPUpgradeOptions{
-				Path: network.Path,
-				Host: network.Host,
-			}
+		t, err := buildV2RayTransport(n.Network, n.NetworkSettings)
+		if err != nil {
+			return option.Inbound{}, err
 		}
 		if info.Type == "vless" {
 			in.Type = "vless"
@@ -213,7 +332,7 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 				InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
 					TLS: &tls,
 				},
-				Transport: &t,
+				Transport: t,
 				Multiplex: multiplex,
 			}
 		} else {
@@ -223,7 +342,7 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 				InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
 					TLS: &tls,
 				},
-				Transport: &t,
+				Transport: t,
 				Multiplex: multiplex,
 			}
 		}
@@ -257,57 +376,9 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 		in.Options = ssoption
 	case "trojan":
 		n := info.Trojan
-		t := option.V2RayTransportOptions{
-			Type: n.Network,
-		}
-		switch n.Network {
-		case "tcp":
-			t.Type = ""
-		case "ws":
-			var (
-				path    string
-				ed      int
-				headers map[string]badoption.Listable[string]
-			)
-			if len(n.NetworkSettings) != 0 {
-				network := WsNetworkConfig{}
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-				var u *url.URL
-				u, err = url.Parse(network.Path)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("parse path error: %s", err)
-				}
-				path = u.Path
-				ed, _ = strconv.Atoi(u.Query().Get("ed"))
-				headers = make(map[string]badoption.Listable[string], len(network.Headers))
-				for k, v := range network.Headers {
-					headers[k] = badoption.Listable[string]{
-						v,
-					}
-				}
-			}
-			t.WebsocketOptions = option.V2RayWebsocketOptions{
-				Path:                path,
-				EarlyDataHeaderName: "Sec-WebSocket-Protocol",
-				MaxEarlyData:        uint32(ed),
-				Headers:             headers,
-			}
-		case "grpc":
-			network := GrpcNetworkConfig{}
-			if len(n.NetworkSettings) != 0 {
-				err := json.Unmarshal(n.NetworkSettings, &network)
-				if err != nil {
-					return option.Inbound{}, fmt.Errorf("decode NetworkSettings error: %s", err)
-				}
-			}
-			t.GRPCOptions = option.V2RayGRPCOptions{
-				ServiceName: network.ServiceName,
-			}
-		default:
-			t.Type = ""
+		t, err := buildV2RayTransport(n.Network, n.NetworkSettings)
+		if err != nil {
+			return option.Inbound{}, err
 		}
 		in.Type = "trojan"
 		trojanoption := &option.TrojanInboundOptions{
@@ -315,7 +386,7 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 			InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
 				TLS: &tls,
 			},
-			Transport: &t,
+			Transport: t,
 			Multiplex: multiplex,
 		}
 		if c.SingOptions.FallBackConfigs != nil {
@@ -337,7 +408,11 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 		in.Options = trojanoption
 	case "tuic":
 		in.Type = "tuic"
-		tls.ALPN = append(tls.ALPN, "h3")
+		if len(info.Tuic.ALPN) > 0 {
+			tls.ALPN = badoption.Listable[string](info.Tuic.ALPN)
+		} else {
+			tls.ALPN = badoption.Listable[string]{"h3"}
+		}
 		in.Options = &option.TUICInboundOptions{
 			ListenOptions:     listen,
 			CongestionControl: info.Tuic.CongestionControl,
@@ -390,6 +465,33 @@ func getInboundOptions(tag string, info *panel.NodeInfo, c *conf.Options) (optio
 				TLS: &tls,
 			},
 		}
+	case "socks":
+		in.Type = "socks"
+		in.Options = &option.SocksInboundOptions{
+			ListenOptions: listen,
+			Users:         []auth.User{randomAuthUser()},
+		}
+	case "http":
+		in.Type = "http"
+		in.Options = &option.HTTPMixedInboundOptions{
+			ListenOptions: listen,
+			Users:         []auth.User{randomAuthUser()},
+			InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
+				TLS: &tls,
+			},
+		}
+	case "naive":
+		in.Type = "naive"
+		if !tls.Enabled {
+			return option.Inbound{}, fmt.Errorf("naive inbound requires tls certificate config")
+		}
+		in.Options = &option.NaiveInboundOptions{
+			ListenOptions: listen,
+			Users:         []auth.User{randomAuthUser()},
+			InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{
+				TLS: &tls,
+			},
+		}
 	}
 	return in, nil
 }
@@ -417,6 +519,16 @@ func (b *Sing) AddNode(tag string, info *panel.NodeInfo, config *conf.Options) e
 }
 
 func (b *Sing) DelNode(tag string) error {
+	b.users.mapLock.Lock()
+	if tagUsers, exists := b.users.tagUsers[tag]; exists {
+		for uuid := range tagUsers {
+			delete(b.users.uidMap, singUIDKey(tag, uuid))
+		}
+		delete(b.users.tagUsers, tag)
+	}
+	b.users.mapLock.Unlock()
+	delete(b.nodeReportMinTrafficBytes, tag)
+	b.hookServer.counter.Delete(tag)
 	in := b.box.Inbound()
 	err := in.Remove(tag)
 	if err != nil {

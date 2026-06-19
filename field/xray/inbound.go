@@ -101,6 +101,7 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 			break // disable
 		default:
 			in.StreamSetting.Security = "tls"
+			settings := xrayTLSSettings(nodeInfo)
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
@@ -110,45 +111,76 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 					},
 				},
 				RejectUnknownSNI: option.CertConfig.RejectUnknownSni,
+				ALPN:             (*coreConf.StringList)(&settings.ALPN),
+				ECHServerKeys:    firstNonEmpty(settings.ECH.ServerKeys, settings.ECH.Key),
+				ECHConfigList:    firstNonEmpty(settings.ECH.ConfigList, settings.ECH.Config),
+				ECHForceQuery:    settings.ECH.ForceQuery,
 			}
 		}
 	case panel.Reality:
 		// Reality
 		in.StreamSetting.Security = "reality"
-		v := nodeInfo.VAllss
-		dest := v.TlsSettings.Dest
+		settings := xrayTLSSettings(nodeInfo)
+		dest := settings.Dest
 		if dest == "" {
-			dest = v.TlsSettings.ServerName
+			dest = settings.ServerName
 		}
-		xver := v.TlsSettings.Xver
-		if xver == 0 {
-			xver = v.RealityConfig.Xver
+		xver := settings.Xver
+		var realityConfig panel.RealityConfig
+		if nodeInfo.VAllss != nil {
+			realityConfig = nodeInfo.VAllss.RealityConfig
+			if xver == 0 {
+				xver = realityConfig.Xver
+			}
 		}
 		d, err := json.Marshal(fmt.Sprintf(
 			"%s:%s",
 			dest,
-			v.TlsSettings.ServerPort))
+			settings.ServerPort))
 		if err != nil {
 			return nil, fmt.Errorf("marshal reality dest error: %s", err)
 		}
-		mtd, _ := time.ParseDuration(v.RealityConfig.MaxTimeDiff)
+		mtd, _ := time.ParseDuration(realityConfig.MaxTimeDiff)
 		in.StreamSetting.REALITYSettings = &coreConf.REALITYConfig{
 			Dest:         d,
 			Xver:         xver,
 			Show:         false,
-			ServerNames:  []string{v.TlsSettings.ServerName},
-			PrivateKey:   v.TlsSettings.PrivateKey,
-			MinClientVer: v.RealityConfig.MinClientVer,
-			MaxClientVer: v.RealityConfig.MaxClientVer,
+			ServerNames:  []string{settings.ServerName},
+			PrivateKey:   settings.PrivateKey,
+			MinClientVer: realityConfig.MinClientVer,
+			MaxClientVer: realityConfig.MaxClientVer,
 			MaxTimeDiff:  uint64(mtd.Microseconds()),
-			ShortIds:     []string{v.TlsSettings.ShortId},
-			Mldsa65Seed:  v.TlsSettings.Mldsa65Seed,
+			ShortIds:     []string{settings.ShortId},
+			Mldsa65Seed:  settings.Mldsa65Seed,
 		}
 	default:
 		break
 	}
 	in.Tag = tag
 	return in.Build()
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func xrayTLSSettings(info *panel.NodeInfo) panel.TlsSettings {
+	switch info.Type {
+	case "vmess", "vless":
+		if info.VAllss != nil {
+			return info.VAllss.TlsSettings
+		}
+	case "trojan":
+		if info.Trojan != nil {
+			return info.Trojan.TlsSettings
+		}
+	}
+	return panel.TlsSettings{}
 }
 
 func buildV2ray(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
@@ -173,6 +205,9 @@ func buildV2ray(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCon
 		} else {
 			var err error
 			decryption := "none"
+			if nodeInfo.VAllss.Decryption != "" {
+				decryption = nodeInfo.VAllss.Decryption
+			}
 			if nodeInfo.VAllss.Encryption != "" {
 				switch nodeInfo.VAllss.Encryption {
 				case "mlkem768x25519plus":
@@ -289,6 +324,11 @@ func buildTrojan(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *coreCo
 		if err != nil {
 			return fmt.Errorf("unmarshal grpc settings error: %s", err)
 		}
+	case "httpupgrade":
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
+		if err != nil {
+			return fmt.Errorf("unmarshal httpupgrade settings error: %s", err)
+		}
 	default:
 		return errors.New("the network type is not vail")
 	}
@@ -319,10 +359,6 @@ func buildShadowsocks(config *conf.Options, nodeInfo *panel.NodeInfo, inbound *c
 	}
 	settings.Users = append(settings.Users, defaultSSuser)
 	settings.NetworkList = &coreConf.NetworkList{"tcp", "udp"}
-	settings.IVCheck = true
-	if config.XrayOptions.DisableIVCheck {
-		settings.IVCheck = false
-	}
 	t := coreConf.TransportProtocol("tcp")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	sets, err := json.Marshal(settings)

@@ -6,11 +6,12 @@ import (
 	"os"
 	"sync"
 
+	"github.com/qingsu/atlas/mirror/panel"
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 
-	"github.com/qingsu/atlas/paper"
 	vCore "github.com/qingsu/atlas/field"
+	"github.com/qingsu/atlas/paper"
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
@@ -35,8 +36,9 @@ type Sing struct {
 }
 
 type UserMap struct {
-	uidMap  map[string]int
-	mapLock sync.RWMutex
+	uidMap   map[string]int
+	tagUsers map[string]map[string]panel.UserInfo
+	mapLock  sync.RWMutex
 }
 
 func init() {
@@ -84,13 +86,14 @@ func New(c *conf.CoreConfig) (vCore.Core, error) {
 	}
 	b.Router().AppendTracker(hs)
 	return &Sing{
-		ctx:        b.Router().GetCtx(),
+		ctx:        ctx,
 		box:        b,
 		hookServer: hs,
 		router:     b.Router(),
 		logFactory: b.LogFactory(),
 		users: &UserMap{
-			uidMap: make(map[string]int),
+			uidMap:   make(map[string]int),
+			tagUsers: make(map[string]map[string]panel.UserInfo),
 		},
 		nodeReportMinTrafficBytes: make(map[string]int64),
 	}, nil
@@ -108,6 +111,9 @@ func (b *Sing) Protocols() []string {
 	return []string{
 		"vmess",
 		"vless",
+		"socks",
+		"http",
+		"naive",
 		"shadowsocks",
 		"trojan",
 		"tuic",

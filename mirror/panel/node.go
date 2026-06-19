@@ -36,6 +36,7 @@ type NodeInfo struct {
 	AnyTls      *AnyTlsNode
 	Hysteria    *HysteriaNode
 	Hysteria2   *Hysteria2Node
+	Simple      *SimpleNode
 	Common      *CommonNode
 }
 
@@ -45,6 +46,7 @@ type CommonNode struct {
 	ServerName string      `json:"server_name"`
 	Routes     []Route     `json:"routes"`
 	BaseConfig *BaseConfig `json:"base_config"`
+	Multiplex  *Multiplex  `json:"multiplex"`
 }
 
 type Route struct {
@@ -68,6 +70,7 @@ type VAllssNode struct {
 	NetworkSettings     json.RawMessage `json:"network_settings"`
 	NetworkSettingsBack json.RawMessage `json:"networkSettings"`
 	Encryption          string          `json:"encryption"`
+	Decryption          string          `json:"decryption"`
 	EncryptionSettings  EncSettings     `json:"encryption_settings"`
 	ServerName          string          `json:"server_name"`
 
@@ -77,13 +80,16 @@ type VAllssNode struct {
 }
 
 type TlsSettings struct {
-	ServerName  string `json:"server_name"`
-	Dest        string `json:"dest"`
-	ServerPort  string `json:"server_port"`
-	ShortId     string `json:"short_id"`
-	PrivateKey  string `json:"private_key"`
-	Mldsa65Seed string `json:"mldsa65Seed"`
-	Xver        uint64 `json:"xver,string"`
+	ServerName    string      `json:"server_name"`
+	Dest          string      `json:"dest"`
+	ServerPort    string      `json:"server_port"`
+	ShortId       string      `json:"short_id"`
+	PrivateKey    string      `json:"private_key"`
+	Mldsa65Seed   string      `json:"mldsa65Seed"`
+	Xver          uint64      `json:"xver,string"`
+	ALPN          StringList  `json:"alpn"`
+	ECH           ECHSettings `json:"ech"`
+	AllowInsecure bool        `json:"allow_insecure"`
 }
 
 type EncSettings struct {
@@ -91,6 +97,59 @@ type EncSettings struct {
 	Ticket        string `json:"ticket"`
 	ServerPadding string `json:"server_padding"`
 	PrivateKey    string `json:"private_key"`
+}
+
+type StringList []string
+
+func (s *StringList) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*s = nil
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err == nil {
+		*s = list
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(data, &single); err != nil {
+		return err
+	}
+	if single == "" {
+		*s = nil
+		return nil
+	}
+	*s = strings.Split(single, ",")
+	for i := range *s {
+		(*s)[i] = strings.TrimSpace((*s)[i])
+	}
+	return nil
+}
+
+type ECHSettings struct {
+	Enabled         bool   `json:"enabled"`
+	Key             string `json:"key"`
+	KeyPath         string `json:"key_path"`
+	Config          string `json:"config"`
+	ConfigPath      string `json:"config_path"`
+	QueryServerName string `json:"query_server_name"`
+	ServerKeys      string `json:"server_keys"`
+	ConfigList      string `json:"config_list"`
+	ForceQuery      string `json:"force_query"`
+}
+
+type Multiplex struct {
+	Enabled        bool          `json:"enabled"`
+	Protocol       string        `json:"protocol"`
+	MaxConnections int           `json:"max_connections"`
+	Padding        bool          `json:"padding"`
+	Brutal         MultiplexRate `json:"brutal"`
+}
+
+type MultiplexRate struct {
+	Enabled  bool `json:"enabled"`
+	UpMbps   int  `json:"up_mbps"`
+	DownMbps int  `json:"down_mbps"`
 }
 
 type RealityConfig struct {
@@ -108,14 +167,19 @@ type ShadowsocksNode struct {
 
 type TrojanNode struct {
 	CommonNode
-	Network         string          `json:"network"`
-	NetworkSettings json.RawMessage `json:"networkSettings"`
+	Tls                 int             `json:"tls"`
+	TlsSettings         TlsSettings     `json:"tls_settings"`
+	TlsSettingsBack     *TlsSettings    `json:"tlsSettings"`
+	Network             string          `json:"network"`
+	NetworkSettings     json.RawMessage `json:"network_settings"`
+	NetworkSettingsBack json.RawMessage `json:"networkSettings"`
 }
 
 type TuicNode struct {
 	CommonNode
-	CongestionControl string `json:"congestion_control"`
-	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
+	CongestionControl string     `json:"congestion_control"`
+	ZeroRTTHandshake  bool       `json:"zero_rtt_handshake"`
+	ALPN              StringList `json:"alpn"`
 }
 
 type AnyTlsNode struct {
@@ -137,6 +201,13 @@ type Hysteria2Node struct {
 	DownMbps                int    `json:"down_mbps"`
 	ObfsType                string `json:"obfs"`
 	ObfsPassword            string `json:"obfs-password"`
+}
+
+type SimpleNode struct {
+	CommonNode
+	Tls             int          `json:"tls"`
+	TlsSettings     TlsSettings  `json:"tls_settings"`
+	TlsSettingsBack *TlsSettings `json:"tlsSettings"`
 }
 
 type RawDNS struct {
@@ -223,9 +294,33 @@ func (c *Client) GetNodeInfo() (node *NodeInfo, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode trojan params error: %s", err)
 		}
+		if len(rsp.NetworkSettingsBack) > 0 {
+			rsp.NetworkSettings = rsp.NetworkSettingsBack
+			rsp.NetworkSettingsBack = nil
+		}
+		if rsp.TlsSettingsBack != nil {
+			rsp.TlsSettings = *rsp.TlsSettingsBack
+			rsp.TlsSettingsBack = nil
+		}
 		cm = &rsp.CommonNode
 		node.Trojan = rsp
-		node.Security = Tls
+		node.Security = rsp.Tls
+		if node.Security == None {
+			node.Security = Tls
+		}
+	case "socks", "http", "naive":
+		rsp := &SimpleNode{}
+		err = json.Unmarshal(r.Body(), rsp)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s params error: %s", c.NodeType, err)
+		}
+		if rsp.TlsSettingsBack != nil {
+			rsp.TlsSettings = *rsp.TlsSettingsBack
+			rsp.TlsSettingsBack = nil
+		}
+		cm = &rsp.CommonNode
+		node.Simple = rsp
+		node.Security = rsp.Tls
 	case "tuic":
 		rsp := &TuicNode{}
 		err = json.Unmarshal(r.Body(), rsp)

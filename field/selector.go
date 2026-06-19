@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,11 +13,13 @@ import (
 
 type Selector struct {
 	cores map[string]Core
+	order []string
 	nodes sync.Map
 }
 
 func NewSelector(c []conf.CoreConfig) (Core, error) {
 	cs := make(map[string]Core, len(c))
+	order := make([]string, 0, len(c))
 	for _, t := range c {
 		f, ok := cores[strings.ToLower(t.Type)]
 		if !ok {
@@ -26,14 +29,16 @@ func NewSelector(c []conf.CoreConfig) (Core, error) {
 		if err != nil {
 			return nil, err
 		}
-		if t.Name == "" {
-			cs[t.Type] = core1
-		} else {
-			cs[t.Name] = core1
+		key := t.Name
+		if key == "" {
+			key = t.Type
 		}
+		cs[key] = core1
+		order = append(order, key)
 	}
 	return &Selector{
 		cores: cs,
+		order: order,
 	}, nil
 }
 
@@ -67,42 +72,83 @@ func isSupported(protocol string, protocols []string) bool {
 }
 
 func (s *Selector) AddNode(tag string, info *panel.NodeInfo, option *conf.Options) error {
-	var core Core
+	rawOptions := option.RawOptions
+	requestedCore := option.Core
 	if len(option.CoreName) > 0 {
 		// use name to select core
 		if c, ok := s.cores[option.CoreName]; ok {
-			core = c
+			if err := prepareCoreOptions(option, c, rawOptions); err != nil {
+				return err
+			}
+			if err := c.AddNode(tag, info, option); err != nil {
+				return err
+			}
+			option.RawOptions = nil
+			s.nodes.Store(tag, c)
+			return nil
 		}
-	} else {
-		// use type to select core
-		for _, c := range s.cores {
-			if len(option.Core) == 0 {
-				if !isSupported(info.Type, c.Protocols()) {
-					continue
-				}
-			} else if option.Core != c.Type() {
+		return errors.New("the node core name is not support")
+	}
+
+	var errs []error
+	for _, name := range s.order {
+		c := s.cores[name]
+		if requestedCore == "" {
+			if !isSupported(info.Type, c.Protocols()) {
 				continue
 			}
-			core = c
+		} else if requestedCore != c.Type() {
+			continue
 		}
-	}
-	if core == nil {
-		return errors.New("the node type is not support")
-	}
-	if len(option.Core) == 0 {
-		option.Core = core.Type()
-		err := option.UnmarshalJSON(option.RawOptions)
-		if err != nil {
-			return fmt.Errorf("unmarshal option error: %s", err)
+		if err := prepareCoreOptions(option, c, rawOptions); err != nil {
+			return err
+		}
+		if err := c.AddNode(tag, info, option); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", c.Type(), err))
+			option.RawOptions = rawOptions
+			continue
 		}
 		option.RawOptions = nil
+		s.nodes.Store(tag, c)
+		return nil
 	}
-	err := core.AddNode(tag, info, option)
+	if len(errs) > 0 {
+		return fmt.Errorf("add node failed on compatible cores: %w", errors.Join(errs...))
+	}
+	return errors.New("the node type is not support")
+}
+
+func prepareCoreOptions(option *conf.Options, c Core, rawOptions []byte) error {
+	if option.Core == c.Type() && rawOptions == nil {
+		return nil
+	}
+	option.Core = c.Type()
+	option.RawOptions = rawOptions
+	if rawOptions == nil {
+		return nil
+	}
+	patchedOptions, err := injectCoreOption(rawOptions, c.Type())
 	if err != nil {
-		return err
+		return fmt.Errorf("inject core option error: %s", err)
 	}
-	s.nodes.Store(tag, core)
+	if err := option.UnmarshalJSON(patchedOptions); err != nil {
+		return fmt.Errorf("unmarshal option error: %s", err)
+	}
+	option.Core = c.Type()
 	return nil
+}
+
+func injectCoreOption(rawOptions []byte, coreType string) ([]byte, error) {
+	options := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(rawOptions, &options); err != nil {
+		return nil, err
+	}
+	coreValue, err := json.Marshal(coreType)
+	if err != nil {
+		return nil, err
+	}
+	options["Core"] = coreValue
+	return json.Marshal(options)
 }
 
 func (s *Selector) DelNode(tag string) error {
