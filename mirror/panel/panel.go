@@ -12,8 +12,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/qingsu/atlas/paper"
 	"github.com/go-resty/resty/v2"
+	"github.com/qingsu/atlas/paper"
 )
 
 // Panel is the interface for different panel's api.
@@ -43,9 +43,10 @@ func New(c *conf.ApiConfig) (*Client, error) {
 		client = resty.NewWithLocalAddr(&net.TCPAddr{
 			IP: net.ParseIP(c.APISendIP),
 		})
-	} else {	
+	} else {
 		client = resty.New()
 	}
+	client.SetLogger(redactingRestyLogger{})
 	client.SetRetryCount(3)
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
@@ -57,7 +58,9 @@ func New(c *conf.ApiConfig) (*Client, error) {
 		if errors.As(err, &v) {
 			// v.Response contains the last response from the server
 			// v.Err contains the original error
-			logrus.Error(v.Err)
+			if v.Err != nil {
+				logrus.Error(redactPanelSecrets(v.Err.Error()))
+			}
 		}
 	})
 	client.SetBaseURL(apiHost)
@@ -97,13 +100,17 @@ func New(c *conf.ApiConfig) (*Client, error) {
 }
 
 func normalizeAPIHost(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
+	raw = trimAPIHostInput(raw)
 	if raw == "" {
 		return "", fmt.Errorf("invalid ApiHost: value is empty")
 	}
 
 	if scheme, rest, ok := strings.Cut(raw, "://"); ok {
-		raw = scheme + "://" + strings.TrimLeftFunc(rest, unicode.IsSpace)
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		if hostContainsWhitespace(rest) {
+			return "", fmt.Errorf("invalid ApiHost %q: host contains whitespace", raw)
+		}
+		raw = scheme + "://" + rest
 	}
 
 	parsed, err := url.Parse(raw)
@@ -119,4 +126,21 @@ func normalizeAPIHost(raw string) (string, error) {
 
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed.String(), nil
+}
+
+func trimAPIHostInput(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "`'\"")
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimLeft(raw, "([{<")
+	raw = strings.TrimRight(raw, ")]}>.,;")
+	raw = strings.Trim(raw, "`'\"")
+	return strings.TrimSpace(raw)
+}
+
+func hostContainsWhitespace(rest string) bool {
+	if idx := strings.IndexAny(rest, "/?#"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	return strings.IndexFunc(rest, unicode.IsSpace) >= 0
 }

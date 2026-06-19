@@ -25,6 +25,11 @@ func TestNormalizeAPIHost(t *testing.T) {
 			want:  "https://example.com/api/v1",
 		},
 		{
+			name:  "trim copied wrapping punctuation",
+			input: "(https://www.example.com/)",
+			want:  "https://www.example.com",
+		},
+		{
 			name:    "reject whitespace in host",
 			input:   "https://exa mple.com",
 			wantErr: "host contains whitespace",
@@ -72,5 +77,29 @@ func TestCheckResponseWithNilResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("expected empty response error, got %q", err.Error())
+	}
+}
+
+func TestAssembleURLPreservesScheme(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{APIHost: "https://example.com/api"}
+	got := client.assembleURL("/v1/server/UniProxy/config")
+	want := "https://example.com/api/v1/server/UniProxy/config"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestRedactPanelSecrets(t *testing.T) {
+	t.Parallel()
+
+	input := "Get \"https://example.com/api?node_id=1&token=tasty-secret&node_type=vless\": timeout {\"ApiKey\":\"json-secret\"}"
+	got := redactPanelSecrets(input)
+	if strings.Contains(got, "tasty-secret") || strings.Contains(got, "json-secret") || strings.Contains(got, "secret") {
+		t.Fatalf("expected secrets to be redacted, got %q", got)
+	}
+	if !strings.Contains(got, "token=<redacted>&node_type") || !strings.Contains(got, "\"ApiKey\":\"<redacted>\"") {
+		t.Fatalf("expected redacted markers, got %q", got)
 	}
 }
