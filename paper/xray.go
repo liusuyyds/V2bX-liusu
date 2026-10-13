@@ -56,6 +56,10 @@ type XrayOptions struct {
 	DisableSniffing     bool                    `json:"DisableSniffing"`
 	EnableFallback      bool                    `json:"EnableFallback"`
 	FallBackConfigs     []FallBackConfigForXray `json:"FallBackConfigs"`
+	// Inbound TCP keep-alive. See field/xray/inbound.go for why this matters.
+	// 0 means "leave it to the system default" for that field only.
+	TcpKeepAliveIdle     int32 `json:"TcpKeepAliveIdle"`
+	TcpKeepAliveInterval int32 `json:"TcpKeepAliveInterval"`
 }
 
 type FallBackConfigForXray struct {
@@ -76,5 +80,9 @@ func NewXrayOptions() *XrayOptions {
 		DisableIVCheck:      false,
 		DisableSniffing:     false,
 		EnableFallback:      false,
+		// Enable inbound keep-alive by default so dead client sockets get
+		// reaped by the kernel instead of piling up in ESTAB forever.
+		TcpKeepAliveIdle:     60,
+		TcpKeepAliveInterval: 15,
 	}
 }

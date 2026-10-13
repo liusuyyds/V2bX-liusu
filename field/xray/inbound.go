@@ -89,6 +89,23 @@ func buildInbound(option *conf.Options, nodeInfo *panel.NodeInfo, tag string) (*
 		} //Enable proxy protocol
 		in.StreamSetting.SocketSettings = socketConfig
 	}
+
+	// Xray disables TCP keep-alive on inbound listeners by default
+	// (see xray-core/transport/internet/system_listener.go: "default disable
+	// keepalive"), and a plain TCP pass-through has no application level idle
+	// timeout either. Mobile clients routinely disappear without sending FIN,
+	// so those sockets stay in ESTAB forever and pile up into thousands of
+	// dead connections. Letting the kernel probe them gets them reaped.
+	if in.StreamSetting == nil {
+		t := coreConf.TransportProtocol("tcp")
+		in.StreamSetting = &coreConf.StreamConfig{Network: &t}
+	}
+	if in.StreamSetting.SocketSettings == nil {
+		in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+	}
+	in.StreamSetting.SocketSettings.TCPKeepAliveIdle = option.XrayOptions.TcpKeepAliveIdle
+	in.StreamSetting.SocketSettings.TCPKeepAliveInterval = option.XrayOptions.TcpKeepAliveInterval
+
 	// Set TLS or Reality settings
 	switch nodeInfo.Security {
 	case panel.Tls:
